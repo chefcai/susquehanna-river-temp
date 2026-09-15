@@ -1,0 +1,120 @@
+name: Susquehanna River Temperature Alert
+
+on:
+  schedule:
+    # 9 AM UTC = 5 AM EDT — always before sunrise at Columbia, PA year-round
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      skip_sunrise_wait:
+        description: 'Skip sunrise wait (for testing — delivers immediately)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  temperature-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6-hour cap; max sunrise wait is ~3.5 hrs
+
+    steps:
+      - name: Wait until sunrise at Columbia, PA
+        env:
+          SKIP_SUNRISE_WAIT: ${{ inputs.skip_sunrise_wait || 'false' }}
+        run: |
+          if [ "$SKIP_SUNRISE_WAIT" = "true" ]; then
+            echo "Skipping sunrise wait (manual trigger)"
+            exit 0
+          fi
+
+          # USGS site 01576003 coordinates: Susquehanna River at Columbia, PA
+          LAT=40.0284308
+          LON=-76.5177432
+
+          echo "Fetching sunrise time for ${LAT}, ${LON}..."
+          for attempt in 1 2 3; do
+            SUNRISE_RESP=$(curl -sf --max-time 10 \
+              "https://api.sunrise-sunset.org/json?lat=${LAT}&lng=${LON}&formatted=0") && break
+            echo "Sunrise API attempt ${attempt} failed"
+            [ $attempt -lt 3 ] && sleep 5
+          done
+
+          if [ -z "$SUNRISE_RESP" ]; then
+            echo "::warning::Could not fetch sunrise time — proceeding immediately"
+            exit 0
+          fi
+
+          SUNRISE_UTC=$(echo "$SUNRISE_RESP" | jq -r '.results.sunrise')
+          echo "Today s sunrise (UTC): $SUNRISE_UTC"
+
+          SUNRISE_EPOCH=$(date -d "$SUNRISE_UTC" +%s)
+          NOW_EPOCH=$(date +%s)
+          SLEEP_SECS=$((SUNRISE_EPOCH - NOW_EPOCH))
+
+          if [ "$SLEEP_SECS" -gt 0 ]; then
+            echo "Sleeping ${SLEEP_SECS}s (~$(( SLEEP_SECS / 60 )) min) until sunrise..."
+            sleep "$SLEEP_SECS"
+            echo "Sunrise reached — continuing"
+          else
+            echo "Sunrise already passed (${SLEEP_SECS}s ago) — continuing immediately"
+          fi
+
+      - name: Fetch water temperature from USGS
+        id: fetch_temp
+        run: |
+          USGS_URL="https://waterservices.usgs.gov/nwis/iv/?sites=01576003&parameterCd=00011&format=json"
+
+          for attempt in 1 2 3; do
+            echo "USGS fetch attempt ${attempt}..."
+            RESPONSE=$(curl -sf --max-time 30 "$USGS_URL") && break
+            echo "Attempt ${attempt} failed"
+            [ $attempt -lt 3 ] && sleep 10
+          done
+
+          if [ -z "$RESPONSE" ]; then
+            echo "::error::Failed to fetch USGS data after 3 attempts"
+            exit 1
+          fi
+
+          # Parameter 00011 = water temperature in degrees Celsius
+          TEMP_C=$(echo "$RESPONSE" | jq -r \
+            '.value.timeSeries[0].values[0].value | sort_by(.dateTime) | last | .value')
+
+          if [ -z "$TEMP_C" ] || [ "$TEMP_C" = "null" ]; then
+            echo "::error::No temperature reading in USGS response"
+            echo "$RESPONSE" | jq '.value.timeSeries[0].values[0].value[-3:]'
+            exit 1
+          fi
+
+          # Convert C to F
+          TEMP_F=$(echo "scale=1; $TEMP_C * 9 / 5 + 32" | bc)
+
+          LAST_TS=$(echo "$RESPONSE" | jq -r \
+            '.value.timeSeries[0].values[0].value | sort_by(.dateTime) | last | .dateTime')
+          DISPLAY_TIME=$(date -d "$LAST_TS" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "$LAST_TS")
+
+          echo "temp_c=$TEMP_C"        >> "$GITHUB_OUTPUT"
+          echo "temp_f=$TEMP_F"        >> "$GITHUB_OUTPUT"
+          echo "obs_time=$DISPLAY_TIME" >> "$GITHUB_OUTPUT"
+          echo "Result: ${TEMP_F}F (${TEMP_C}C) as of ${DISPLAY_TIME}"
+
+      - name: Send sunrise notification
+        run: |
+          TODAY=$(date '+%A, %B %-d')
+          curl -sf \
+            -H "Title: Susquehanna River Temperature — ${TODAY}" \
+            -H "Priority: default" \
+            -H "Tags: thermometer,sunny" \
+            -d "Water temp at sunrise: ${{ steps.fetch_temp.outputs.temp_f }}F | Obs: ${{ steps.fetch_temp.outputs.obs_time }} | Columbia, PA (USGS 01576003)" \
+            https://ntfy.sh/susquehanna-river-temp
+          echo "Notification delivered"
+
+      - name: Send error notification on failure
+        if: failure()
+        run: |
+          curl -sf \
+            -H "Title: Susquehanna Alert Failed" \
+            -H "Priority: high" \
+            -H "Tags: warning" \
+            -d "Failed to fetch or deliver water temperature. Details: https://github.com/chefcai/susquehanna-river-temp/actions" \
+            https://ntfy.sh/susquehanna-river-temp || true
