@@ -62,7 +62,7 @@ jobs:
       - name: Fetch water temperature from USGS
         id: fetch_temp
         run: |
-          USGS_URL="https://waterservices.usgs.gov/nwis/iv/?sites=01576003&parameterCd=00011&format=json"
+          USGS_URL="https://waterservices.usgs.gov/nwis/iv/?sites=01576003&parameterCd=00010&format=json"
 
           for attempt in 1 2 3; do
             echo "USGS fetch attempt ${attempt}..."
@@ -76,7 +76,7 @@ jobs:
             exit 1
           fi
 
-          # Parameter 00011 = water temperature in degrees Celsius
+          # Parameter 00010 = water temperature in degrees Celsius
           TEMP_C=$(echo "$RESPONSE" | jq -r \
             '.value.timeSeries[0].values[0].value | sort_by(.dateTime) | last | .value')
 
