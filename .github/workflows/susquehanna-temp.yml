@@ -76,6 +76,14 @@ jobs:
             exit 1
           fi
 
+          # Guard against truncated HTTP responses: curl exits 0 on partial transfers
+          # when the HTTP header was received successfully (exit 18 is swallowed).
+          # jq empty parses the whole document and fails on incomplete JSON.
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "::error::USGS returned malformed/incomplete JSON (likely truncated response)"
+            exit 1
+          fi
+
           # Parameter 00010 = water temperature in degrees Celsius
           TEMP_C=$(echo "$RESPONSE" | jq -r \
             '.value.timeSeries[0].values[0].value | sort_by(.dateTime) | last | .value')
