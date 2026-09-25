@@ -1,9 +1,9 @@
 name: Susquehanna River Temperature Alert
 
 on:
-  schedule:
-    # 9 AM UTC = 5 AM EDT — always before sunrise at Columbia, PA year-round
-    - cron: '0 9 * * *'
+  # Triggered externally by cron-job.org at 09:00 UTC daily via workflow_dispatch.
+  # The GitHub-internal schedule cron has been removed because free-tier GitHub Actions
+  # cron delays (up to several hours) prevented reliable sunrise-time delivery.
   workflow_dispatch:
     inputs:
       skip_sunrise_wait:
